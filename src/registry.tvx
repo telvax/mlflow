@@ -1,0 +1,38 @@
+# The model registry: registered models, their versions and aliases.
+from client import Client, done, post, code_of
+
+fn object(pairs: List[(Text, Text)]) -> Text:
+    let m: Map[Text, Text] = std.map.new()
+    for p in pairs:
+        m.insert(p.0, p.1)
+    std.json.stringify(m)
+
+# Registers a model name. A name that is already registered is fine.
+fn create_registered_model(c: Client, name: Text) -> Result[(), Text]:
+    match post(c, "registered-models/create", object([("name", name)])):
+        case Ok(_):
+            Ok(done())
+        case Err(e):
+            if code_of(e) == "RESOURCE_ALREADY_EXISTS":
+                return Ok(done())
+            Err(e)
+
+type ModelVersion:
+    name: Text
+    version: Text
+    source: Text
+    run_id: Text
+
+type ModelVersionAnswer:
+    model_version: ModelVersion
+
+# A new version of a registered model, from `source` (such as `runs:/<run id>/model`) logged by `run_id`. Gives its number.
+fn create_model_version(c: Client, name: Text, source: Text, run_id: Text) -> Result[Text, Text]:
+    let text = post(c, "model-versions/create", object([("name", name), ("source", source), ("run_id", run_id)]))?
+    let answer: Result[ModelVersionAnswer, Text] = std.json.parse(text)
+    Ok(answer?.model_version.version)
+
+# Points `alias` (such as `champion`) of a registered model at a version.
+fn set_registered_model_alias(c: Client, name: Text, alias: Text, version: Text) -> Result[(), Text]:
+    post(c, "registered-models/alias", object([("name", name), ("alias", alias), ("version", version)]))?
+    Ok(done())

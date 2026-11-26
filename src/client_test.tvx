@@ -1,0 +1,21 @@
+from client import connect, url, error_text, code_of, encode
+from tracking import RunInfo, artifact_url
+
+fn test_urls_and_encoding():
+    let c = connect("http://localhost:5000//")
+    assert_eq(url(c, "runs/create"), "http://localhost:5000/api/2.0/mlflow/runs/create")
+    assert_eq(encode("my model/v1 é"), "my%20model%2Fv1%20%C3%A9")
+
+fn test_error_answers():
+    let e = error_text(404, "{\"error_code\": \"RESOURCE_DOES_NOT_EXIST\", \"message\": \"Could not find experiment\"}")
+    assert_eq(e, "MLflow answered 404: RESOURCE_DOES_NOT_EXIST: Could not find experiment")
+    assert_eq(code_of(e), "RESOURCE_DOES_NOT_EXIST")
+    assert_eq(error_text(502, "<html>bad gateway</html>"), "MLflow answered 502")
+    assert_eq(code_of("MLflow answered 502"), "")
+
+fn test_artifacts_go_through_the_proxy_of_the_server():
+    let c = connect("http://mlflow:5000")
+    let run = RunInfo(run_id: "abc", experiment_id: "1", artifact_uri: "mlflow-artifacts:/1/abc/artifacts", status: "RUNNING")
+    assert_eq(artifact_url(c, run, "model/model v1.bin").unwrap(), "http://mlflow:5000/api/2.0/mlflow-artifacts/artifacts/1/abc/artifacts/model/model%20v1.bin")
+    let local = RunInfo(run_id: "abc", experiment_id: "1", artifact_uri: "file:///tmp/mlruns/1/abc/artifacts", status: "RUNNING")
+    assert(artifact_url(c, local, "x").is_err())

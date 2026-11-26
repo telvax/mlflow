@@ -1,0 +1,6 @@
+[package]
+name = "mlflow"
+version = "0.1.0"
+edition = "2026"
+description = "An MLflow client for Telvax: experiments, runs, params, metrics, artifacts and the model registry, over the REST API"
+license = "MIT OR Apache-2.0"

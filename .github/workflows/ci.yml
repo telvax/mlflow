@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The package needs std.http.client and std.bytes, which are in the `develop` branch of Telvax and not yet in a
+      # release. Once a release has them, this becomes the install script (scripts/install.sh) of Telvax.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Telvax from develop
+        run: cargo install --locked --git https://github.com/telvax/telvax --branch develop telvax_cli telvax_pkg
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Start MLflow
+        run: |
+          pip install "mlflow==2.17.2" "sqlalchemy>=2.0.20,<2.1"
+          mlflow server --host 127.0.0.1 --port 5000 --backend-store-uri "sqlite:///$RUNNER_TEMP/mlflow.db" \
+            --artifacts-destination "$RUNNER_TEMP/mlartifacts" > "$RUNNER_TEMP/mlflow.log" 2>&1 &
+          for i in $(seq 1 60); do curl -fs http://127.0.0.1:5000/health && break; sleep 1; done
+      - name: Check, format and unit tests
+        run: |
+          for f in src/*.tvx; do telvax check "$f"; telvax fmt --check "$f"; done
+          for f in src/*_test.tvx; do telvax test "$f"; done
+      - name: Log to the server and read it back with MLflow's client
+        working-directory: tests/server
+        env:
+          MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+        run: |
+          out="$(tvpm run main)"
+          echo "$out"
+          python check.py "$out"

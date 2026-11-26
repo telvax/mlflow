@@ -1,0 +1,96 @@
+# The connection to an MLflow tracking server, and the requests of its REST API (`/api/2.0/mlflow/...`).
+from std.http.client import HttpResponse
+
+# A tracking server. `auth` is the value of the `authorization` header, or empty.
+type Client:
+    uri: Text
+    auth: Text
+
+fn env(name: Text) -> Text:
+    std.env.get(name).unwrap_or("")
+
+# The value of a function that gives nothing (Telvax has no `()` literal).
+fn done():
+    pass
+
+# A client for `uri`, with the credentials of the environment: `MLFLOW_TRACKING_TOKEN` (a bearer token), or
+# `MLFLOW_TRACKING_USERNAME` and `MLFLOW_TRACKING_PASSWORD` (basic authentication).
+fn connect(uri: Text) -> Client:
+    var base = uri
+    while base.ends_with("/"):
+        base = base.slice(0, -1)
+    var auth = ""
+    let token = env("MLFLOW_TRACKING_TOKEN")
+    let user = env("MLFLOW_TRACKING_USERNAME")
+    if not token.is_empty():
+        auth = "Bearer " + token
+    elif not user.is_empty():
+        auth = "Basic " + std.encoding.base64(std.bytes.from_text(user + ":" + env("MLFLOW_TRACKING_PASSWORD")))
+    Client(uri: base, auth: auth)
+
+# A client for `MLFLOW_TRACKING_URI`.
+fn from_env() -> Result[Client, Text]:
+    let uri = env("MLFLOW_TRACKING_URI")
+    if not uri.starts_with("http://") and not uri.starts_with("https://"):
+        return Err("set MLFLOW_TRACKING_URI to the address of an MLflow server (http:// or https://)")
+    Ok(connect(uri))
+
+# The URL of an endpoint of the REST API, such as `runs/create`.
+fn url(c: Client, endpoint: Text) -> Text:
+    c.uri + "/api/2.0/mlflow/" + endpoint
+
+fn headers(c: Client, json: Bool) -> Map[Text, Text]:
+    let h: Map[Text, Text] = std.map.new()
+    if json:
+        h.insert("content-type", "application/json")
+    if not c.auth.is_empty():
+        h.insert("authorization", c.auth)
+    h
+
+# The words of an error answer: `{"error_code": ..., "message": ...}` as MLflow writes it, or the status alone.
+fn error_text(status: Int, body: Text) -> Text:
+    let parsed: Result[Map[Text, Text], Text] = std.json.parse(body)
+    match parsed:
+        case Ok(m):
+            match (m.get("error_code"), m.get("message")):
+                case (Some(code), Some(message)):
+                    f"MLflow answered {status}: {code}: {message}"
+                case _:
+                    f"MLflow answered {status}"
+        case Err(_):
+            f"MLflow answered {status}"
+
+# The body of an answer, or the error it carries.
+fn body_of(resp: HttpResponse) -> Result[Text, Text]:
+    let text = resp.text().unwrap_or("")
+    if not resp.ok():
+        return Err(error_text(resp.status(), text))
+    Ok(text)
+
+# The error code of an `Err` of `error_text`, such as `RESOURCE_ALREADY_EXISTS`.
+fn code_of(error: Text) -> Text:
+    let parts = error.split(": ")
+    if parts.len() < 3:
+        return ""
+    parts.get(1).unwrap()
+
+fn post(c: Client, endpoint: Text, json: Text) -> Result[Text, Text]:
+    body_of(std.http.client.post(url(c, endpoint), json, headers(c, True))?)
+
+fn get(c: Client, endpoint: Text) -> Result[Text, Text]:
+    body_of(std.http.client.get(url(c, endpoint), headers(c, False))?)
+
+# A query parameter, encoded.
+fn encode(text: Text) -> Text:
+    let keep = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
+    var out = ""
+    for ch in text.chars():
+        if keep.contains(ch):
+            out = out + ch
+        else:
+            let hex = std.text.uppercase(std.encoding.hex(std.bytes.from_text(ch)))
+            var i = 0
+            while i < std.math.to_int(hex.len()):
+                out = out + "%" + hex.slice(i, i + 2)
+                i = i + 2
+    out

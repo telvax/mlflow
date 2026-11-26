@@ -1,0 +1,149 @@
+# Experiments, runs, params, metrics, tags and artifacts.
+from std.bytes import Bytes
+from client import Client, done, post, get, encode, code_of, headers, body_of
+
+type Experiment:
+    experiment_id: Text
+    name: Text
+
+type ExperimentAnswer:
+    experiment: Experiment
+
+type CreatedExperiment:
+    experiment_id: Text
+
+# What MLflow says of a run: its id, its experiment and where its artifacts go.
+type RunInfo:
+    run_id: Text
+    experiment_id: Text
+    artifact_uri: Text
+    status: Text
+
+type Run:
+    info: RunInfo
+
+type RunAnswer:
+    run: Run
+
+type Param:
+    key: Text
+    value: Text
+
+type Metric:
+    key: Text
+    value: Float
+    timestamp: Int
+    step: Int
+
+type Tag:
+    key: Text
+    value: Text
+
+type Batch:
+    run_id: Text
+    params: List[Param]
+    metrics: List[Metric]
+    tags: List[Tag]
+
+# Milliseconds since 1970, as MLflow stores times.
+fn now_ms() -> Int:
+    std.math.to_int(std.time.now() * 1000.0)
+
+fn object(pairs: List[(Text, Text)]) -> Text:
+    let m: Map[Text, Text] = std.map.new()
+    for p in pairs:
+        m.insert(p.0, p.1)
+    std.json.stringify(m)
+
+# The id of the experiment `name`, created when there is none.
+fn get_or_create(c: Client, name: Text) -> Result[Text, Text]:
+    match get(c, "experiments/get-by-name?experiment_name=" + encode(name)):
+        case Ok(text):
+            let found: Result[ExperimentAnswer, Text] = std.json.parse(text)
+            return Ok(found?.experiment.experiment_id)
+        case Err(e):
+            if code_of(e) != "RESOURCE_DOES_NOT_EXIST":
+                return Err(e)
+    match post(c, "experiments/create", object([("name", name)])):
+        case Ok(text):
+            let created: Result[CreatedExperiment, Text] = std.json.parse(text)
+            Ok(created?.experiment_id)
+        case Err(e):
+            # Created by someone else in between: read it again.
+            if code_of(e) != "RESOURCE_ALREADY_EXISTS":
+                return Err(e)
+            let again: Result[ExperimentAnswer, Text] = std.json.parse(get(c, "experiments/get-by-name?experiment_name=" + encode(name))?)
+            Ok(again?.experiment.experiment_id)
+
+type CreateRun:
+    experiment_id: Text
+    run_name: Text
+    start_time: Int
+
+# Starts a run in an experiment, and gives what MLflow says of it.
+fn start_run(c: Client, experiment_id: Text, name: Text) -> Result[RunInfo, Text]:
+    let body = std.json.stringify(CreateRun(experiment_id: experiment_id, run_name: name, start_time: now_ms()))
+    let answer: Result[RunAnswer, Text] = std.json.parse(post(c, "runs/create", body)?)
+    Ok(answer?.run.info)
+
+type UpdateRun:
+    run_id: Text
+    status: Text
+    end_time: Int
+
+# Ends a run with a status: `FINISHED`, `FAILED` or `KILLED`.
+fn end_run(c: Client, run_id: Text, status: Text) -> Result[(), Text]:
+    post(c, "runs/update", std.json.stringify(UpdateRun(run_id: run_id, status: status, end_time: now_ms())))?
+    Ok(done())
+
+# What MLflow says of a run now.
+fn get_run(c: Client, run_id: Text) -> Result[RunInfo, Text]:
+    let answer: Result[RunAnswer, Text] = std.json.parse(get(c, "runs/get?run_id=" + encode(run_id))?)
+    Ok(answer?.run.info)
+
+fn set_tag(c: Client, run_id: Text, key: Text, value: Text) -> Result[(), Text]:
+    post(c, "runs/set-tag", object([("run_id", run_id), ("key", key), ("value", value)]))?
+    Ok(done())
+
+# A parameter of a run. MLflow keeps the first value: logging another one for the same key is an error.
+fn log_param(c: Client, run_id: Text, key: Text, value: Text) -> Result[(), Text]:
+    post(c, "runs/log-parameter", object([("run_id", run_id), ("key", key), ("value", value)]))?
+    Ok(done())
+
+type LogMetric:
+    run_id: Text
+    key: Text
+    value: Float
+    timestamp: Int
+    step: Int
+
+# A value of a metric at a step, timed now.
+fn log_metric(c: Client, run_id: Text, key: Text, value: Float, step: Int) -> Result[(), Text]:
+    post(c, "runs/log-metric", std.json.stringify(LogMetric(run_id: run_id, key: key, value: value, timestamp: now_ms(), step: step)))?
+    Ok(done())
+
+# Params, metrics and tags in one request (MLflow takes up to 100 params, 1000 metrics and 100 tags at once).
+fn log_batch(c: Client, run_id: Text, params: List[Param], metrics: List[Metric], tags: List[Tag]) -> Result[(), Text]:
+    post(c, "runs/log-batch", std.json.stringify(Batch(run_id: run_id, params: params, metrics: metrics, tags: tags)))?
+    Ok(done())
+
+# The URL that uploads `path` to the artifacts of a run, through the artifact proxy of the server (`mlflow-artifacts:`
+# runs, the default of `mlflow server`).
+fn artifact_url(c: Client, run: RunInfo, path: Text) -> Result[Text, Text]:
+    let scheme = "mlflow-artifacts:"
+    if not run.artifact_uri.starts_with(scheme):
+        return Err(f"the artifacts of this run go to {run.artifact_uri}, which this client cannot write; start the server with --serve-artifacts")
+    var rest = run.artifact_uri.slice(std.math.to_int(scheme.len()), std.math.to_int(run.artifact_uri.len()))
+    while rest.starts_with("/"):
+        rest = rest.slice(1, std.math.to_int(rest.len()))
+    var parts: List[Text] = []
+    for p in path.split("/"):
+        parts.push(encode(p))
+    Ok(c.uri + "/api/2.0/mlflow-artifacts/artifacts/" + rest + "/" + std.text.join(parts, "/"))
+
+# Uploads `data` as the artifact `path` of a run (a `std.model` file, a chart, a report).
+fn log_artifact(c: Client, run: RunInfo, path: Text, data: Bytes) -> Result[(), Text]:
+    let h = headers(c, False)
+    h.insert("content-type", "application/octet-stream")
+    body_of(std.http.client.put(artifact_url(c, run, path)?, data, h)?)?
+    Ok(done())
